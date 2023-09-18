@@ -1,8 +1,7 @@
-// ver V1.0.3
-import { BANNER } from '../src/mediaTypes.js';
+import { BANNER, VIDEO } from '../src/mediaTypes.js';
 import { ortbConverter } from '../libraries/ortbConverter/converter.js'
 import { registerBidder } from '../src/adapters/bidderFactory.js';
-import { deepSetValue, generateUUID, timestamp } from '../src/utils.js';
+import { deepSetValue, generateUUID, timestamp, deepAccess } from '../src/utils.js';
 import { getStorageManager } from '../src/storageManager.js';
 import { MODULE_TYPE_RTD } from '../src/activities/modules.js';
 
@@ -43,18 +42,58 @@ function setPangleCookieId(sid) {
   }
 }
 
+function createRequest(bidRequests, bidderRequest, mediaType) {
+  const data = converter.toORTB({ bidRequests, bidderRequest, context: { mediaType } })
+  const devicetype = spec.getDeviceType(navigator.userAgent);
+  deepSetValue(data, 'device.devicetype', devicetype);
+  if (bidderRequest.userId && typeof bidderRequest.userId === 'object') {
+    const pangleId = getPangleCookieId();
+    // add pangle cookie
+    const _eids = data.user?.ext?.eids ?? []
+    deepSetValue(data, 'user.ext.eids', [..._eids, {
+      source: document.location.host,
+      uids: [
+        {
+          id: pangleId,
+          atype: 1
+        }
+      ]
+    }]);
+  }
+  bidRequests.forEach((item, idx) => {
+    deepSetValue(data.imp[idx], 'ext.networkids', item.params);
+    deepSetValue(data.imp[idx], 'banner.api', [5]);
+    // todo: 测试
+    deepSetValue(data.imp[idx], 'banner.format', [{ 'h': 250, 'w': 300 }]);
+  });
+  return {
+    method: 'POST',
+    url: ENDPOINT,
+    data,
+    options: { contentType: 'application/json', withCredentials: true }
+  }
+}
+
+function isVideoBid(bid) {
+  return !!deepAccess(bid, 'mediaTypes.video');
+}
+
+function isBannerBid(bid) {
+  return !!deepAccess(bid, 'mediaTypes.banner');
+}
+
 const converter = ortbConverter({
   context: {
     netRevenue: DEFAULT_NET_REVENUE,
     ttl: DEFAULT_BID_TTL,
     currency: DEFAULT_CURRENCY,
-    mediaType: BANNER
+    // mediaType: BANNER
   }
 });
 
 export const spec = {
   code: BIDDER_CODE,
-  supportedMediaTypes: [BANNER],
+  supportedMediaTypes: [BANNER, VIDEO],
 
   getDeviceType: function (ua) {
     if ((/ipad|android 3.0|xoom|sch-i800|playbook|tablet|kindle/i.test(ua.toLowerCase()))) {
@@ -71,34 +110,13 @@ export const spec = {
   },
 
   buildRequests(bidRequests, bidderRequest) {
-    const data = converter.toORTB({ bidRequests, bidderRequest })
-    const devicetype = spec.getDeviceType(navigator.userAgent);
-    deepSetValue(data, 'device.devicetype', devicetype);
-    if (bidderRequest.userId && typeof bidderRequest.userId === 'object') {
-      const pangleId = getPangleCookieId();
-      // add pangle cookie
-      const _eids = data.user?.ext?.eids ?? []
-      deepSetValue(data, 'user.ext.eids', [..._eids, {
-        source: document.location.host,
-        uids: [
-          {
-            id: pangleId,
-            atype: 1
-          }
-        ]
-      }]);
-    }
-    bidRequests.forEach((item, idx) => {
-      deepSetValue(data.imp[idx], 'ext.networkids', item.params);
-      deepSetValue(data.imp[idx], 'banner.api', [5]);
+    const videoBids = bidRequests.filter(bid => isVideoBid(bid));
+    const bannerBids = bidRequests.filter(bid => isBannerBid(bid));
+    let requests = bannerBids.length ? [createRequest(bannerBids, bidderRequest, BANNER)] : [];
+    videoBids.forEach(bid => {
+      requests.push(createRequest([bid], bidderRequest, VIDEO));
     });
-
-    return [{
-      method: 'POST',
-      url: ENDPOINT,
-      data,
-      options: { contentType: 'application/json', withCredentials: true }
-    }]
+    return requests;
   },
 
   interpretResponse(response, request) {
